@@ -1,0 +1,280 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [ published ]
+
+env:
+  PYTHON_VERSION: '3.11'
+  DOCKER_REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # =============================================================================
+  # CODE QUALITY & TESTING
+  # =============================================================================
+  lint-and-test:
+    name: Lint and Test
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+          
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements_production.txt
+        pip install flake8 black isort mypy pytest pytest-cov safety bandit
+        
+    - name: Run linting
+      run: |
+        echo "Running flake8..."
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+        
+        echo "Running black..."
+        black --check --diff .
+        
+        echo "Running isort..."
+        isort --check-only --diff .
+        
+    - name: Run type checking
+      run: |
+        mypy --ignore-missing-imports --no-strict-optional .
+        
+    - name: Run security scan
+      run: |
+        safety check --json --output safety-report.json || true
+        bandit -r . -f json -o bandit-report.json || true
+        
+    - name: Run tests
+      run: |
+        pytest --cov=. --cov-report=xml --cov-report=html --cov-report=term-missing
+        pytest --cov=. --cov-report=xml --cov-report=html --cov-report=term-missing
+        
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+        fail_ci_if_error: false
+
+  # =============================================================================
+  # SECURITY SCANNING
+  # =============================================================================
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+        
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+        
+    - name: Run Snyk security scan
+      uses: snyk/actions/python@master
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      with:
+        args: --severity-threshold=high
+
+  # =============================================================================
+  # DOCKER BUILD & TEST
+  # =============================================================================
+  docker-build:
+    name: Build and Test Docker Image
+    runs-on: ubuntu-latest
+    needs: [lint-and-test]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.DOCKER_REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=sha,prefix={{branch}}-
+          
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        
+    - name: Test Docker image
+      run: |
+        docker run --rm ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }} python -c "import sys; print('Python version:', sys.version)"
+        docker run --rm ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }} python -c "import slack_bolt; print('Slack Bolt imported successfully')"
+
+  # =============================================================================
+  # DEPLOYMENT STAGES
+  # =============================================================================
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [docker-build, security-scan]
+    if: github.ref == 'refs/heads/develop'
+    environment: staging
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Deploy to staging environment
+      run: |
+        echo "Deploying to staging environment..."
+        # Add your staging deployment commands here
+        # Example: kubectl apply -f k8s/staging/
+        # Or: docker-compose -f docker-compose.staging.yml up -d
+        
+    - name: Run smoke tests
+      run: |
+        echo "Running smoke tests against staging..."
+        # Add smoke test commands here
+        # Example: curl -f http://staging-url/health
+        
+    - name: Notify staging deployment
+      uses: 8398a7/action-slack@v3
+      with:
+        status: success
+        text: 'Staging deployment successful! :rocket:'
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      if: always()
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [docker-build, security-scan]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Deploy to production environment
+      run: |
+        echo "Deploying to production environment..."
+        # Add your production deployment commands here
+        # Example: kubectl apply -f k8s/production/
+        # Or: docker-compose -f docker-compose.production.yml up -d
+        
+    - name: Run health checks
+      run: |
+        echo "Running health checks..."
+        # Add health check commands here
+        # Example: curl -f http://production-url/health
+        
+    - name: Notify production deployment
+      uses: 8398a7/action-slack@v3
+      with:
+        status: success
+        text: 'Production deployment successful! :rocket:'
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      if: always()
+
+  # =============================================================================
+  # RELEASE MANAGEMENT
+  # =============================================================================
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [deploy-production]
+    if: github.event_name == 'release' && github.event.action == 'published'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Generate release notes
+      id: release_notes
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const { data: commits } = await github.rest.repos.compareCommits({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            base: 'main',
+            head: context.sha
+          });
+          
+          const releaseNotes = commits.commits
+            .map(commit => `- ${commit.commit.message}`)
+            .join('\n');
+            
+          return releaseNotes;
+          
+    - name: Create GitHub Release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.event.release.tag_name }}
+        release_name: Release ${{ github.event.release.tag_name }}
+        body: |
+          ## What's Changed
+          ${{ steps.release_notes.outputs.result }}
+          
+          ## Docker Image
+          `${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.event.release.tag_name }}`
+          
+          ## Deployment
+          - [ ] Staging: `${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.event.release.tag_name }}`
+          - [ ] Production: `${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.event.release.tag_name }}`
+        draft: false
+        prerelease: false 
