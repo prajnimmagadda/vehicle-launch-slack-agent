@@ -45,7 +45,7 @@ uvicorn==0.25.0
 structlog==23.2.0
 
 # Security
-cryptography==41.0.8
+cryptography>=41.0.0
 bcrypt==4.1.2
 
 # Testing (for production validation)

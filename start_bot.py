@@ -21,7 +21,8 @@ def validate_environment():
     
     missing_vars = []
     for var in required_vars:
-        if not os.getenv(var):
+        value = os.getenv(var)
+        if not value or value.strip() == '':
             missing_vars.append(var)
     
     if missing_vars:

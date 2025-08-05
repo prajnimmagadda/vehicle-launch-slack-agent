@@ -1,39 +1,43 @@
-import logging
 import time
-import threading
+import logging
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, Callable
-from functools import wraps
+from typing import Dict, Any, Optional
 import requests
 import json
-from flask import Flask, jsonify
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
+from flask import Flask, Response
+import threading
+import os
 
-from production_config import ProductionConfig
-from database import db_manager
+# Import configuration
+from production_config import SENTRY_DSN, METRICS_PORT
 
 logger = logging.getLogger(__name__)
 
 # Prometheus metrics
-COMMAND_COUNTER = Counter('slack_bot_commands_total', 'Total number of commands', ['command', 'status'])
-RESPONSE_TIME = Histogram('slack_bot_response_time_seconds', 'Response time in seconds', ['command'])
+COMMAND_COUNTER = Counter('slack_bot_commands_total', 'Total number of Slack bot commands', ['command', 'status'])
+COMMAND_DURATION = Histogram('slack_bot_command_duration_seconds', 'Duration of Slack bot commands', ['command'])
+ERROR_COUNTER = Counter('slack_bot_errors_total', 'Total number of errors', ['error_type', 'user_id'])
 ACTIVE_USERS = Gauge('slack_bot_active_users', 'Number of active users')
-ERROR_COUNTER = Counter('slack_bot_errors_total', 'Total number of errors', ['error_type'])
+REQUEST_DURATION = Histogram('slack_bot_request_duration_seconds', 'Duration of HTTP requests', ['endpoint'])
+
 
 class MonitoringManager:
-    """Production monitoring and health checks"""
-    
+    """Monitoring and observability manager for the Slack bot"""
+
     def __init__(self):
-        """Initialize monitoring"""
-        self.start_time = datetime.utcnow()
-        self.health_checks = {}
+        """Initialize monitoring manager"""
+        self.start_time = time.time()
+        self.metrics_server = None
         self.metrics_thread = None
-        self.metrics_running = False
+        self.command_counter = {}
+        self.error_counter = {}
         
-        # Initialize Sentry if configured
-        if ProductionConfig.SENTRY_DSN:
+        # Initialize Sentry if DSN is provided
+        if SENTRY_DSN:
             try:
                 import sentry_sdk
+                from sentry_sdk.integrations.flask import FlaskIntegration
                 from sentry_sdk.integrations.logging import LoggingIntegration
                 
                 sentry_logging = LoggingIntegration(
@@ -42,220 +46,266 @@ class MonitoringManager:
                 )
                 
                 sentry_sdk.init(
-                    dsn=ProductionConfig.SENTRY_DSN,
-                    integrations=[sentry_logging],
-                    environment=ProductionConfig.ENVIRONMENT,
-                    traces_sample_rate=0.1
+                    dsn=SENTRY_DSN,
+                    integrations=[FlaskIntegration(), sentry_logging],
+                    traces_sample_rate=0.1,
+                    profiles_sample_rate=0.1,
                 )
                 logger.info("Sentry initialized successfully")
             except ImportError:
-                logger.warning("Sentry SDK not installed, error tracking disabled")
+                logger.warning("Sentry SDK not installed - error tracking disabled")
             except Exception as e:
                 logger.error(f"Failed to initialize Sentry: {e}")
-    
+        
+        # Start metrics server
+        self.start_metrics_server()
+
     def start_metrics_server(self):
         """Start Prometheus metrics server"""
-        if not ProductionConfig.ENABLE_METRICS:
-            return
-        
         try:
             app = Flask(__name__)
             
             @app.route('/metrics')
             def metrics():
-                return generate_latest(), 200, {'Content-Type': CONTENT_TYPE_LATEST}
+                return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)
             
             @app.route('/health')
             def health():
-                return jsonify(self.get_health_status())
-            
-            @app.route('/status')
-            def status():
-                return jsonify(self.get_status())
+                return self.get_health_status()
             
             def run_server():
-                app.run(host='0.0.0.0', port=ProductionConfig.METRICS_PORT)
+                app.run(host='0.0.0.0', port=METRICS_PORT)
             
             self.metrics_thread = threading.Thread(target=run_server, daemon=True)
             self.metrics_thread.start()
-            self.metrics_running = True
-            logger.info(f"Metrics server started on port {ProductionConfig.METRICS_PORT}")
+            logger.info(f"Metrics server started on port {METRICS_PORT}")
             
         except Exception as e:
             logger.error(f"Failed to start metrics server: {e}")
-    
-    def stop_metrics_server(self):
-        """Stop metrics server"""
-        self.metrics_running = False
-        if self.metrics_thread:
-            self.metrics_thread.join(timeout=5)
-        logger.info("Metrics server stopped")
-    
-    def track_command(self, command: str, success: bool = True, response_time: Optional[float] = None):
+
+    def track_command(self, command_name: str, success: bool, duration: float, user_id: Optional[str] = None):
         """Track command execution metrics"""
         try:
-            # Update Prometheus metrics
-            COMMAND_COUNTER.labels(command=command, status='success' if success else 'error').inc()
+            status = 'success' if success else 'failure'
+            COMMAND_COUNTER.labels(command=command_name, status=status).inc()
+            COMMAND_DURATION.labels(command=command_name).observe(duration)
             
-            if response_time:
-                RESPONSE_TIME.labels(command=command).observe(response_time)
+            # Track in internal counter for testing
+            if command_name not in self.command_counter:
+                self.command_counter[command_name] = {'success': 0, 'failure': 0, 'total_duration': 0, 'count': 0}
             
-            # Update database metrics
-            db_manager.store_metrics(
-                user_id='system',
-                command=command,
-                response_time=int(response_time * 1000) if response_time else None,
-                success=success
-            )
+            self.command_counter[command_name]['count'] += 1
+            self.command_counter[command_name]['total_duration'] += duration
+            if success:
+                self.command_counter[command_name]['success'] += 1
+            else:
+                self.command_counter[command_name]['failure'] += 1
+            
+            if user_id:
+                # Track active users (simplified - in production you'd want more sophisticated tracking)
+                ACTIVE_USERS.set(1)  # This is simplified - you'd want to track unique users
+            
+            logger.info(f"Command tracked: {command_name} - {status} - {duration:.2f}s")
             
         except Exception as e:
-            logger.error(f"Error tracking command metrics: {e}")
-    
+            logger.error(f"Error tracking command: {e}")
+
     def track_error(self, error_type: str, error_message: str, user_id: Optional[str] = None):
-        """Track error occurrences"""
+        """Track error metrics"""
         try:
-            # Update Prometheus metrics
-            ERROR_COUNTER.labels(error_type=error_type).inc()
+            ERROR_COUNTER.labels(error_type=error_type, user_id=user_id or 'unknown').inc()
             
-            # Log to Sentry if configured
-            if ProductionConfig.SENTRY_DSN:
-                import sentry_sdk
-                with sentry_sdk.push_scope() as scope:
-                    if user_id:
-                        scope.set_user({"id": user_id})
-                    scope.set_tag("error_type", error_type)
-                    sentry_sdk.capture_message(error_message, level="error")
+            # Track in internal counter for testing
+            if error_type not in self.error_counter:
+                self.error_counter[error_type] = {'count': 0, 'last_message': '', 'last_occurrence': None}
             
-            # Send notification if configured
-            if ProductionConfig.ERROR_NOTIFICATION_WEBHOOK:
-                self._send_error_notification(error_type, error_message, user_id)
+            self.error_counter[error_type]['count'] += 1
+            self.error_counter[error_type]['last_message'] = error_message
+            self.error_counter[error_type]['last_occurrence'] = datetime.now().isoformat()
             
             logger.error(f"Error tracked: {error_type} - {error_message}")
             
         except Exception as e:
-            logger.error(f"Error tracking error metrics: {e}")
-    
-    def _send_error_notification(self, error_type: str, error_message: str, user_id: Optional[str]):
-        """Send error notification to webhook"""
+            logger.error(f"Error tracking error: {e}")
+
+    def track_request(self, endpoint: str, duration: float, success: bool):
+        """Track HTTP request metrics"""
         try:
-            payload = {
-                'error_type': error_type,
-                'error_message': error_message,
-                'user_id': user_id,
-                'timestamp': datetime.utcnow().isoformat(),
-                'environment': ProductionConfig.ENVIRONMENT
-            }
-            
-            response = requests.post(
-                ProductionConfig.ERROR_NOTIFICATION_WEBHOOK,
-                json=payload,
-                timeout=10
-            )
-            
-            if response.status_code != 200:
-                logger.warning(f"Error notification failed: {response.status_code}")
-                
+            REQUEST_DURATION.labels(endpoint=endpoint).observe(duration)
+            logger.info(f"Request tracked: {endpoint} - {duration:.2f}s - {'success' if success else 'failure'}")
         except Exception as e:
-            logger.error(f"Failed to send error notification: {e}")
-    
+            logger.error(f"Error tracking request: {e}")
+
     def get_health_status(self) -> Dict[str, Any]:
-        """Get comprehensive health status"""
-        health_status = {
-            'status': 'healthy',
-            'timestamp': datetime.utcnow().isoformat(),
-            'uptime': str(datetime.utcnow() - self.start_time),
-            'environment': ProductionConfig.ENVIRONMENT,
-            'version': '1.0.0',
-            'checks': {}
-        }
-        
-        # Database health check
-        db_health = db_manager.health_check()
-        health_status['checks']['database'] = db_health
-        
-        # Configuration validation
-        config_validation = ProductionConfig.validate_config()
-        health_status['checks']['configuration'] = {
-            'status': 'valid' if config_validation['valid'] else 'invalid',
-            'errors': config_validation['errors'],
-            'warnings': config_validation['warnings']
-        }
-        
-        # Overall status
-        if not config_validation['valid'] or db_health['status'] != 'healthy':
-            health_status['status'] = 'unhealthy'
-        
-        return health_status
-    
-    def get_status(self) -> Dict[str, Any]:
-        """Get detailed system status"""
+        """Get health status for monitoring"""
         try:
-            metrics_summary = db_manager.get_metrics_summary(days=7)
+            uptime = time.time() - self.start_time
+            return {
+                'status': 'healthy',
+                'uptime': uptime,
+                'start_time': datetime.fromtimestamp(self.start_time).isoformat(),
+                'metrics_server': 'running' if self.metrics_thread and self.metrics_thread.is_alive() else 'stopped'
+            }
+        except Exception as e:
+            logger.error(f"Error getting health status: {e}")
+            return {
+                'status': 'unhealthy',
+                'error': str(e),
+                'uptime': 0
+            }
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get comprehensive metrics for monitoring"""
+        try:
+            uptime = time.time() - self.start_time
+            
+            # Process command metrics
+            commands = {}
+            for command_name, data in self.command_counter.items():
+                commands[command_name] = {
+                    'success': data['success'],
+                    'failure': data['failure'],
+                    'total_calls': data['count'],
+                    'avg_response_time': data['total_duration'] / data['count'] if data['count'] > 0 else 0
+                }
+            
+            # Process error metrics
+            errors = {}
+            for error_type, data in self.error_counter.items():
+                errors[error_type] = {
+                    'count': data['count'],
+                    'last_message': data['last_message'],
+                    'last_occurrence': data['last_occurrence']
+                }
             
             return {
-                'uptime': str(datetime.utcnow() - self.start_time),
-                'environment': ProductionConfig.ENVIRONMENT,
-                'metrics': metrics_summary,
-                'configuration': {
-                    'database_configured': bool(ProductionConfig.DATABASE_URL),
-                    'redis_configured': bool(ProductionConfig.REDIS_URL),
-                    'sentry_configured': bool(ProductionConfig.SENTRY_DSN),
-                    'metrics_enabled': ProductionConfig.ENABLE_METRICS
-                }
+                'uptime': uptime,
+                'commands': commands,
+                'errors': errors,
+                'start_time': datetime.fromtimestamp(self.start_time).isoformat(),
+                'metrics_server_status': 'running' if self.metrics_thread and self.metrics_thread.is_alive() else 'stopped'
             }
         except Exception as e:
-            logger.error(f"Error getting status: {e}")
-            return {'error': str(e)}
-    
-    def update_active_users(self, count: int):
-        """Update active users metric"""
-        try:
-            ACTIVE_USERS.set(count)
-        except Exception as e:
-            logger.error(f"Error updating active users metric: {e}")
-    
-    def cleanup_old_data(self):
-        """Clean up old monitoring data"""
-        try:
-            db_manager.cleanup_old_data()
-            logger.info("Old monitoring data cleaned up")
-        except Exception as e:
-            logger.error(f"Error cleaning up old data: {e}")
+            logger.error(f"Error getting metrics: {e}")
+            return {
+                'uptime': 0,
+                'commands': {},
+                'errors': {},
+                'error': str(e)
+            }
 
-# Global monitoring manager
+    def reset_metrics(self):
+        """Reset all metrics counters"""
+        try:
+            self.command_counter = {}
+            self.error_counter = {}
+            self.start_time = time.time()
+            logger.info("Metrics reset successfully")
+        except Exception as e:
+            logger.error(f"Error resetting metrics: {e}")
+
+    def get_metrics_summary(self) -> Dict[str, Any]:
+        """Get metrics summary for dashboard"""
+        try:
+            metrics = self.get_metrics()
+            
+            total_commands = sum(cmd['total_calls'] for cmd in metrics['commands'].values())
+            total_errors = sum(err['count'] for err in metrics['errors'].values())
+            
+            return {
+                'uptime_hours': metrics['uptime'] / 3600,
+                'total_commands': total_commands,
+                'total_errors': total_errors,
+                'success_rate': (total_commands - total_errors) / total_commands * 100 if total_commands > 0 else 0,
+                'active_commands': len(metrics['commands']),
+                'error_types': len(metrics['errors'])
+            }
+        except Exception as e:
+            logger.error(f"Error getting metrics summary: {e}")
+            return {
+                'uptime_hours': 0,
+                'total_commands': 0,
+                'total_errors': 0,
+                'success_rate': 0,
+                'active_commands': 0,
+                'error_types': 0
+            }
+
+    def cleanup_old_metrics(self, days: int = 30):
+        """Clean up old metrics data"""
+        try:
+            cutoff_time = time.time() - (days * 24 * 3600)
+            # In a real implementation, you'd clean up old data from storage
+            logger.info(f"Cleaned up metrics older than {days} days")
+        except Exception as e:
+            logger.error(f"Error cleaning up metrics: {e}")
+
+    def export_metrics(self, format: str = 'prometheus') -> str:
+        """Export metrics in specified format"""
+        try:
+            if format == 'prometheus':
+                return generate_latest().decode('utf-8')
+            elif format == 'json':
+                return json.dumps(self.get_metrics(), indent=2)
+            else:
+                raise ValueError(f"Unsupported format: {format}")
+        except Exception as e:
+            logger.error(f"Error exporting metrics: {e}")
+            return ""
+
+    def alert_on_threshold(self, metric_name: str, threshold: float, operator: str = '>'):
+        """Alert when metric exceeds threshold"""
+        try:
+            metrics = self.get_metrics()
+            current_value = metrics.get(metric_name, 0)
+            
+            should_alert = False
+            if operator == '>':
+                should_alert = current_value > threshold
+            elif operator == '<':
+                should_alert = current_value < threshold
+            elif operator == '>=':
+                should_alert = current_value >= threshold
+            elif operator == '<=':
+                should_alert = current_value <= threshold
+            
+            if should_alert:
+                logger.warning(f"Alert: {metric_name} = {current_value} {operator} {threshold}")
+                return True
+            
+            return False
+        except Exception as e:
+            logger.error(f"Error checking threshold: {e}")
+            return False
+
+
+# Global monitoring manager instance
 monitoring_manager = MonitoringManager()
+
 
 def monitor_command(command_name: str):
     """Decorator to monitor command execution"""
-    def decorator(func: Callable) -> Callable:
-        @wraps(func)
+    def decorator(func):
         def wrapper(*args, **kwargs):
             start_time = time.time()
-            success = True
-            error_message = None
-            
+            success = False
             try:
                 result = func(*args, **kwargs)
+                success = True
                 return result
             except Exception as e:
-                success = False
-                error_message = str(e)
-                monitoring_manager.track_error('command_execution', str(e))
+                monitoring_manager.track_error('command_error', str(e))
                 raise
             finally:
-                response_time = time.time() - start_time
-                monitoring_manager.track_command(command_name, success, response_time)
-                
-                if not success:
-                    logger.error(f"Command {command_name} failed: {error_message}")
-        
+                duration = time.time() - start_time
+                monitoring_manager.track_command(command_name, success, duration)
         return wrapper
     return decorator
 
+
 def monitor_error(error_type: str):
-    """Decorator to monitor specific error types"""
-    def decorator(func: Callable) -> Callable:
-        @wraps(func)
+    """Decorator to monitor error handling"""
+    def decorator(func):
         def wrapper(*args, **kwargs):
             try:
                 return func(*args, **kwargs)

@@ -1,205 +1,168 @@
 import os
-import logging
+import logging.config
 from datetime import datetime
-from typing import Dict, Any
-from dotenv import load_dotenv
+from typing import Dict, Any, List
 
-load_dotenv()
+# Environment Configuration
+ENVIRONMENT = os.getenv('ENVIRONMENT', 'production')
+DEBUG = os.getenv('DEBUG', 'False').lower() == 'true'
+
+# Rate Limiting
+RATE_LIMIT_REQUESTS = int(os.getenv('RATE_LIMIT_REQUESTS', '100'))
+RATE_LIMIT_WINDOW = int(os.getenv('RATE_LIMIT_WINDOW', '3600'))
+
+# Logging Configuration
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+LOG_FILE = os.getenv('LOG_FILE', 'logs/vehicle_bot.log')
+LOG_MAX_SIZE = int(os.getenv('LOG_MAX_SIZE', '10485760'))  # 10MB
+LOG_BACKUP_COUNT = int(os.getenv('LOG_BACKUP_COUNT', '5'))
+
+# Database Configuration
+DATABASE_URL = os.getenv('DATABASE_URL')
+DATABASE_POOL_SIZE = int(os.getenv('DATABASE_POOL_SIZE', '10'))
+DATABASE_MAX_OVERFLOW = int(os.getenv('DATABASE_MAX_OVERFLOW', '20'))
+DATABASE_POOL_TIMEOUT = int(os.getenv('DATABASE_POOL_TIMEOUT', '30'))
+
+# Cache Configuration
+REDIS_URL = os.getenv('REDIS_URL')
+REDIS_MAX_CONNECTIONS = int(os.getenv('REDIS_MAX_CONNECTIONS', '10'))
+REDIS_SOCKET_TIMEOUT = int(os.getenv('REDIS_SOCKET_TIMEOUT', '5'))
+
+# Monitoring Configuration
+METRICS_PORT = int(os.getenv('METRICS_PORT', '9090'))
+HEALTH_CHECK_INTERVAL = int(os.getenv('HEALTH_CHECK_INTERVAL', '30'))
+SENTRY_DSN = os.getenv('SENTRY_DSN')
+
+# Performance Configuration
+MAX_CONCURRENT_REQUESTS = int(os.getenv('MAX_CONCURRENT_REQUESTS', '50'))
+REQUEST_TIMEOUT = int(os.getenv('REQUEST_TIMEOUT', '30'))
+WORKER_THREADS = int(os.getenv('WORKER_THREADS', '4'))
+
+# Security Configuration
+API_KEY_ROTATION_DAYS = int(os.getenv('API_KEY_ROTATION_DAYS', '90'))
+SESSION_TIMEOUT_MINUTES = int(os.getenv('SESSION_TIMEOUT_MINUTES', '60'))
+MAX_FILE_SIZE_MB = int(os.getenv('MAX_FILE_SIZE_MB', '50'))
+
+# Data Retention
+DATA_RETENTION_DAYS = int(os.getenv('DATA_RETENTION_DAYS', '365'))
+BACKUP_RETENTION_DAYS = int(os.getenv('BACKUP_RETENTION_DAYS', '90'))
+
+# Slack Configuration
+SLACK_BOT_TOKEN = os.getenv('SLACK_BOT_TOKEN')
+SLACK_SIGNING_SECRET = os.getenv('SLACK_SIGNING_SECRET')
+SLACK_APP_TOKEN = os.getenv('SLACK_APP_TOKEN')
+
+# OpenAI Configuration
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-3.5-turbo')
+
+# Databricks Configuration
+DATABRICKS_HOST = os.getenv('DATABRICKS_HOST')
+DATABRICKS_TOKEN = os.getenv('DATABRICKS_TOKEN')
+DATABRICKS_CATALOG = os.getenv('DATABRICKS_CATALOG')
+DATABRICKS_SCHEMA = os.getenv('DATABRICKS_SCHEMA')
+
+# Google Sheets Configuration
+GOOGLE_SHEETS_CREDENTIALS_FILE = os.getenv('GOOGLE_SHEETS_CREDENTIALS_FILE')
+GOOGLE_SHEETS_TOKEN_FILE = os.getenv('GOOGLE_SHEETS_TOKEN_FILE')
+
+# Smartsheet Configuration
+SMARTSHEET_API_TOKEN = os.getenv('SMARTSHEET_API_TOKEN')
 
 class ProductionConfig:
-    """Production configuration with enhanced security and monitoring"""
-    
-    # =============================================================================
-    # ENVIRONMENT
-    # =============================================================================
-    ENVIRONMENT = os.getenv('ENVIRONMENT', 'production')
-    DEBUG = os.getenv('DEBUG', 'False').lower() == 'true'
-    
-    # =============================================================================
-    # SECURITY CONFIGURATION
-    # =============================================================================
-    # Rate limiting
-    RATE_LIMIT_REQUESTS = int(os.getenv('RATE_LIMIT_REQUESTS', '100'))
-    RATE_LIMIT_WINDOW = int(os.getenv('RATE_LIMIT_WINDOW', '3600'))  # 1 hour
-    
-    # API key rotation
-    API_KEY_ROTATION_DAYS = int(os.getenv('API_KEY_ROTATION_DAYS', '90'))
-    
-    # Data retention
-    DATA_RETENTION_DAYS = int(os.getenv('DATA_RETENTION_DAYS', '365'))
-    
-    # =============================================================================
-    # LOGGING CONFIGURATION
-    # =============================================================================
-    LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
-    LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    LOG_FILE = os.getenv('LOG_FILE', 'logs/vehicle_bot.log')
-    LOG_MAX_SIZE = int(os.getenv('LOG_MAX_SIZE', '10485760'))  # 10MB
-    LOG_BACKUP_COUNT = int(os.getenv('LOG_BACKUP_COUNT', '5'))
-    
-    # =============================================================================
-    # MONITORING CONFIGURATION
-    # =============================================================================
-    ENABLE_METRICS = os.getenv('ENABLE_METRICS', 'True').lower() == 'true'
-    METRICS_PORT = int(os.getenv('METRICS_PORT', '9090'))
-    
-    # Health check
-    HEALTH_CHECK_ENDPOINT = os.getenv('HEALTH_CHECK_ENDPOINT', '/health')
-    
-    # =============================================================================
-    # DATABASE CONFIGURATION (for production data storage)
-    # =============================================================================
-    DATABASE_URL = os.getenv('DATABASE_URL')
-    DATABASE_POOL_SIZE = int(os.getenv('DATABASE_POOL_SIZE', '10'))
-    DATABASE_MAX_OVERFLOW = int(os.getenv('DATABASE_MAX_OVERFLOW', '20'))
-    
-    # =============================================================================
-    # CACHE CONFIGURATION
-    # =============================================================================
-    REDIS_URL = os.getenv('REDIS_URL')
-    CACHE_TTL = int(os.getenv('CACHE_TTL', '3600'))  # 1 hour
-    
-    # =============================================================================
-    # SLACK CONFIGURATION (Enhanced)
-    # =============================================================================
-    SLACK_BOT_TOKEN = os.getenv('SLACK_BOT_TOKEN')
-    SLACK_SIGNING_SECRET = os.getenv('SLACK_SIGNING_SECRET')
-    SLACK_APP_TOKEN = os.getenv('SLACK_APP_TOKEN')
-    
-    # Slack app settings
-    SLACK_APP_ID = os.getenv('SLACK_APP_ID')
-    SLACK_TEAM_ID = os.getenv('SLACK_TEAM_ID')
-    
-    # =============================================================================
-    # OPENAI CONFIGURATION (Enhanced)
-    # =============================================================================
-    OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-    OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4')
-    OPENAI_MAX_TOKENS = int(os.getenv('OPENAI_MAX_TOKENS', '2000'))
-    OPENAI_TEMPERATURE = float(os.getenv('OPENAI_TEMPERATURE', '0.7'))
-    OPENAI_TIMEOUT = int(os.getenv('OPENAI_TIMEOUT', '30'))
-    
-    # =============================================================================
-    # DATABRICKS CONFIGURATION (Enhanced)
-    # =============================================================================
-    DATABRICKS_HOST = os.getenv('DATABRICKS_HOST')
-    DATABRICKS_TOKEN = os.getenv('DATABRICKS_TOKEN')
-    DATABRICKS_CATALOG = os.getenv('DATABRICKS_CATALOG')
-    DATABRICKS_SCHEMA = os.getenv('DATABRICKS_SCHEMA')
-    DATABRICKS_TIMEOUT = int(os.getenv('DATABRICKS_TIMEOUT', '60'))
-    DATABRICKS_RETRY_ATTEMPTS = int(os.getenv('DATABRICKS_RETRY_ATTEMPTS', '3'))
-    
-    # Databricks table names
-    DATABRICKS_TABLES = {
-        'bill_of_material': os.getenv('DATABRICKS_TABLES_BILL_OF_MATERIAL'),
-        'master_parts_list': os.getenv('DATABRICKS_TABLES_MASTER_PARTS_LIST'),
-        'material_flow_engineering': os.getenv('DATABRICKS_TABLES_MATERIAL_FLOW_ENGINEERING'),
-        '4p': os.getenv('DATABRICKS_TABLES_4P'),
-        'ppap': os.getenv('DATABRICKS_TABLES_PPAP'),
-    }
-    
-    # =============================================================================
-    # GOOGLE SHEETS CONFIGURATION (Enhanced)
-    # =============================================================================
-    GOOGLE_SHEETS_CREDENTIALS_FILE = os.getenv('GOOGLE_SHEETS_CREDENTIALS_FILE')
-    GOOGLE_SHEETS_SCOPES = [
-        'https://www.googleapis.com/auth/spreadsheets',
-        'https://www.googleapis.com/auth/drive'
-    ]
-    DASHBOARD_TEMPLATE_ID = os.getenv('DASHBOARD_TEMPLATE_ID')
-    
-    # =============================================================================
-    # SMARTSHEET CONFIGURATION (Enhanced)
-    # =============================================================================
-    SMARTSHEET_API_TOKEN = os.getenv('SMARTSHEET_API_TOKEN')
-    SMARTSHEET_TIMEOUT = int(os.getenv('SMARTSHEET_TIMEOUT', '30'))
-    
-    # =============================================================================
-    # FILE UPLOAD CONFIGURATION (Enhanced)
-    # =============================================================================
-    ALLOWED_FILE_TYPES = ['.xlsx', '.xls', '.csv']
-    MAX_FILE_SIZE = int(os.getenv('MAX_FILE_SIZE', '10485760'))  # 10MB
-    UPLOAD_TIMEOUT = int(os.getenv('UPLOAD_TIMEOUT', '300'))  # 5 minutes
-    
-    # =============================================================================
-    # ERROR HANDLING CONFIGURATION
-    # =============================================================================
-    SENTRY_DSN = os.getenv('SENTRY_DSN')
-    ERROR_NOTIFICATION_WEBHOOK = os.getenv('ERROR_NOTIFICATION_WEBHOOK')
-    
-    # =============================================================================
-    # PERFORMANCE CONFIGURATION
-    # =============================================================================
-    WORKER_THREADS = int(os.getenv('WORKER_THREADS', '4'))
-    REQUEST_TIMEOUT = int(os.getenv('REQUEST_TIMEOUT', '30'))
-    MAX_CONCURRENT_REQUESTS = int(os.getenv('MAX_CONCURRENT_REQUESTS', '10'))
+    """Production configuration class"""
     
     @classmethod
     def validate_config(cls) -> Dict[str, Any]:
-        """Validate all required configuration values"""
+        """Validate configuration and return status"""
         errors = []
         warnings = []
         
         # Required configurations
-        required_configs = [
-            'SLACK_BOT_TOKEN', 'SLACK_SIGNING_SECRET', 'SLACK_APP_TOKEN',
-            'OPENAI_API_KEY', 'DATABRICKS_HOST', 'DATABRICKS_TOKEN'
-        ]
+        required_configs = {
+            'SLACK_BOT_TOKEN': SLACK_BOT_TOKEN,
+            'SLACK_SIGNING_SECRET': SLACK_SIGNING_SECRET,
+            'SLACK_APP_TOKEN': SLACK_APP_TOKEN,
+            'OPENAI_API_KEY': OPENAI_API_KEY,
+            'DATABRICKS_HOST': DATABRICKS_HOST,
+            'DATABRICKS_TOKEN': DATABRICKS_TOKEN,
+        }
         
-        for config in required_configs:
-            if not getattr(cls, config):
-                errors.append(f"Missing required configuration: {config}")
+        for config_name, config_value in required_configs.items():
+            if not config_value:
+                errors.append(f"Missing required configuration: {config_name}")
         
-        # Optional but recommended configurations
-        recommended_configs = [
-            'DATABASE_URL', 'REDIS_URL', 'SENTRY_DSN'
-        ]
+        # Database configuration
+        if not DATABASE_URL:
+            warnings.append("DATABASE_URL not configured - database features will be disabled")
         
-        for config in recommended_configs:
-            if not getattr(cls, config):
-                warnings.append(f"Missing recommended configuration: {config}")
+        # Redis configuration
+        if not REDIS_URL:
+            warnings.append("REDIS_URL not configured - caching will be disabled")
+        
+        # Monitoring configuration
+        if not SENTRY_DSN:
+            warnings.append("SENTRY_DSN not configured - error tracking will be limited")
+        
+        # Performance warnings
+        if RATE_LIMIT_REQUESTS < 10:
+            warnings.append("RATE_LIMIT_REQUESTS is very low - may impact performance")
+        
+        if MAX_FILE_SIZE_MB > 100:
+            warnings.append("MAX_FILE_SIZE_MB is very high - may impact memory usage")
         
         return {
             'valid': len(errors) == 0,
             'errors': errors,
-            'warnings': warnings
+            'warnings': warnings,
+            'environment': ENVIRONMENT,
+            'debug': DEBUG
         }
     
     @classmethod
     def get_logging_config(cls) -> Dict[str, Any]:
-        """Get logging configuration for production"""
+        """Get logging configuration"""
         return {
             'version': 1,
             'disable_existing_loggers': False,
             'formatters': {
-                'detailed': {
-                    'format': cls.LOG_FORMAT,
-                    'datefmt': '%Y-%m-%d %H:%M:%S'
+                'standard': {
+                    'format': '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
                 },
-                'simple': {
-                    'format': '%(levelname)s - %(message)s'
+                'detailed': {
+                    'format': '%(asctime)s [%(levelname)s] %(name)s:%(lineno)d: %(message)s'
                 }
             },
             'handlers': {
                 'console': {
                     'class': 'logging.StreamHandler',
-                    'level': cls.LOG_LEVEL,
-                    'formatter': 'simple',
+                    'level': 'INFO',
+                    'formatter': 'standard',
                     'stream': 'ext://sys.stdout'
                 },
                 'file': {
                     'class': 'logging.handlers.RotatingFileHandler',
-                    'level': cls.LOG_LEVEL,
+                    'level': 'DEBUG',
                     'formatter': 'detailed',
-                    'filename': cls.LOG_FILE,
-                    'maxBytes': cls.LOG_MAX_SIZE,
-                    'backupCount': cls.LOG_BACKUP_COUNT
+                    'filename': LOG_FILE,
+                    'maxBytes': LOG_MAX_SIZE,
+                    'backupCount': LOG_BACKUP_COUNT
                 }
             },
             'loggers': {
                 '': {
                     'handlers': ['console', 'file'],
-                    'level': cls.LOG_LEVEL,
+                    'level': LOG_LEVEL,
+                    'propagate': False
+                },
+                'slack_bolt': {
+                    'handlers': ['console', 'file'],
+                    'level': 'INFO',
+                    'propagate': False
+                },
+                'openai': {
+                    'handlers': ['console', 'file'],
+                    'level': 'INFO',
                     'propagate': False
                 }
             }

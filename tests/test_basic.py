@@ -16,11 +16,13 @@ class TestProductionConfig:
     
     def test_config_validation(self):
         """Test configuration validation"""
-        # Test with missing required configs
+        # Test with missing required configs - mock more thoroughly
         with patch.dict(os.environ, {}, clear=True):
-            validation = ProductionConfig.validate_config()
-            assert not validation['valid']
-            assert len(validation['errors']) > 0
+            with patch('production_config.DATABASE_URL', None):
+                with patch('production_config.REDIS_URL', None):
+                    validation = ProductionConfig.validate_config()
+                    assert not validation['valid']
+                    assert len(validation['errors']) > 0
     
     def test_logging_config(self):
         """Test logging configuration"""
@@ -76,6 +78,7 @@ class TestSlackBotComponents:
     
     def test_launch_date_extraction(self):
         """Test launch date extraction from text"""
+        # Import here to avoid logging config issues
         from production_slack_bot import ProductionSlackBot
         
         bot = ProductionSlackBot.__new__(ProductionSlackBot)
@@ -111,16 +114,20 @@ class TestFileParser:
 class TestOpenAIClient:
     """Test OpenAI client"""
     
-    @patch('openai.ChatCompletion.create')
-    def test_openai_client_initialization(self, mock_create):
+    @patch('openai.OpenAI')
+    def test_openai_client_initialization(self, mock_openai):
         """Test OpenAI client initialization"""
         from openai_client import OpenAIClient
         
-        # Mock the OpenAI response
+        # Mock the OpenAI client
+        mock_client = Mock()
+        mock_openai.return_value = mock_client
+        
+        # Mock the chat completion response
         mock_response = Mock()
         mock_response.choices = [Mock()]
         mock_response.choices[0].message.content = "Test response"
-        mock_create.return_value = mock_response
+        mock_client.chat.completions.create.return_value = mock_response
         
         client = OpenAIClient()
         assert client is not None
